@@ -1,0 +1,44 @@
+# ── WildFly runtime ──────────────────────────────────────────
+*.dodeploy
+*.deployed
+*.undeployed
+*.failed
+*.isdeploying
+*.skipdeploy
+
+# Logs del servidor
+standalone/log/
+standalone/tmp/
+standalone/data/
+
+# ── Java / Build ──────────────────────────────────────────────
+*.class
+*.jar
+target/
+build/
+out/
+
+# No trackear WARs compilados (solo el de sample-app se incluye)
+*.war
+!sample-app/mi-mini-app.war
+
+# ── IDEs ──────────────────────────────────────────────────────
+.idea/
+*.iml
+.vscode/
+*.suo
+*.user
+.classpath
+.project
+.settings/
+
+# ── OS ────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Temporal / backups ────────────────────────────────────────
+*.backup
+*.bak
+*.tmp
+*.orig
