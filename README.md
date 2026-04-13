@@ -1,7 +1,7 @@
 # 🚀 wildfly-lab
 
-Laboratorio personal para practicar despliegues con **WildFly 39** en Windows.  
-Cubre instalación como servicio, despliegue de WARs, múltiples instancias y automatización.
+Laboratorio personal para practicar despliegues con **WildFly 39** en Windows.
+Cubre instalación como servicio, despliegue de WARs, múltiples instancias, automatización y consola de administración.
 
 > **Objetivo**: replicar en local el flujo de trabajo de un entorno PRO antes de tocarlo.
 
@@ -77,8 +77,8 @@ wildfly-lab/
 | 1 | Instalar WildFly como servicio Windows | ✅ |
 | 2 | Despliegue básico de un WAR | ✅ |
 | 3 | Dos instancias en puertos distintos | ✅ |
-| 4 | Script .bat automatizado | 🔄 |
-| 5 | Consola de administración 9990 | 🔄 |
+| 4 | Script .bat automatizado | ✅ |
+| 5 | Consola de administración 9990 | ✅ |
 
 ---
 
@@ -102,7 +102,7 @@ WildFly usa un sistema de ficheros indicadores para gestionar el ciclo de vida d
 ### Requisitos previos
 
 - Java 11+ instalado y `JAVA_HOME` configurado en variables de entorno
-- Ejecutar todos los comandos como **Administrador**
+- Ejecutar todos los comandos como Administrador
 
 ### Directorios clave
 
@@ -117,7 +117,7 @@ C:\wildfly-39.0.1.Final\
   │   ├── deployments\            ← aquí van los WARs
   │   └── log\
   │       └── server.log          ← logs del servidor
-  └── modules\                   ← drivers y módulos externos
+  └── modules\                    ← drivers y módulos externos
 ```
 
 ### Registrar e iniciar el servicio
@@ -241,7 +241,7 @@ dir C:\wildfly-39.0.1.Final\standalone\deployments\*.failed
 
 Por defecto la URL es el nombre del WAR sin extensión: `mi-mini-app.war` → `/mi-mini-app/`.
 
-Para cambiarlo, añadir `WEB-INF/jboss-web.xml`:
+Para cambiarlo añadir `WEB-INF/jboss-web.xml`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -309,7 +309,7 @@ Buscar `socket-binding-group` y cambiar el `port-offset` de `0` a `100`:
     port-offset="${jboss.socket.binding.port-offset:100}">
 ```
 
-> ⚠️ Este es el **único cambio** necesario en el XML. Un solo número desplaza todos los puertos +100.
+> ⚠️ Este es el único cambio necesario en el XML. Un solo número desplaza todos los puertos +100.
 
 ### Paso 3 — Crear el script de arranque
 
@@ -345,7 +345,7 @@ endlocal
 > directamente porque `cmd.exe` no mantiene el proceso vivo. La solución es compilar
 > un wrapper `.exe` con PowerShell sin necesidad de herramientas externas.
 
-Abrir **PowerShell como Administrador** y pegar este bloque completo:
+Abrir PowerShell como Administrador y pegar este bloque completo:
 
 ```powershell
 $code = @"
@@ -397,7 +397,7 @@ Add-Type -TypeDefinition $code -Language CSharp `
 
 ### Paso 5 — Registrar el servicio Windows
 
-En **PowerShell como Administrador** usar `sc.exe` (no `sc`, que en PowerShell es alias de `Set-Content`):
+En PowerShell como Administrador usar `sc.exe` (no `sc`, que en PowerShell es alias de `Set-Content`):
 
 ```powershell
 sc.exe create "WildFly2" binPath= "C:\wildfly-39.0.1.Final\bin\WildFly2Service.exe" DisplayName= "WildFly Application Server_ 2" start= auto
@@ -422,11 +422,8 @@ Ambos deben mostrar `STATE: 4 RUNNING`.
 ### Verificación final en el navegador
 
 ```
-http://localhost:8080/mi-mini-app/    ← instancia 1 ✅
-http://localhost:8180/mi-mini-app/    ← instancia 2 ✅
-
-http://localhost:9990                 ← admin consola instancia 1
-http://localhost:10090                ← admin consola instancia 2
+http://127.0.0.1:8080/mi-mini-app/    ← instancia 1 ✅
+http://127.0.0.1:8180/mi-mini-app/    ← instancia 2 ✅
 ```
 
 ### Desplegar un WAR en la instancia 2
@@ -451,6 +448,204 @@ powershell "Get-Content C:\wildfly-39.0.1.Final\standalone2\log\server.log -Wait
 | Error "marcado para eliminación" | Servicio pendiente de borrado en memoria | Reiniciar la máquina |
 | Conflicto de puertos al arrancar inst. 2 | Dos procesos en el mismo puerto | Configurar `port-offset=100` en `standalone.xml` |
 | `.bat` creado en una sola línea | Uso incorrecto de bloque `()` en CMD | Crear fichero con `echo` línea a línea usando `>>` |
+
+---
+
+## ✅ Fase 4 — Script .bat automatizado de despliegue
+
+### Concepto
+
+Sustituir el proceso manual de crear `.dodeploy` + revisar log por un único comando
+que lo hace todo y confirma si el despliegue fue bien o mal.
+
+```
+deploy.bat mi-mini-app.war 1       ← despliega en instancia 1 (puerto 8080)
+deploy.bat mi-mini-app.war 2       ← despliega en instancia 2 (puerto 8180)
+```
+
+### Crear el script desde PowerShell
+
+Abrir PowerShell como Administrador y pegar este bloque:
+
+```powershell
+$lines = @(
+'@echo off',
+'setlocal enabledelayedexpansion',
+'set WAR=%1',
+'set INSTANCIA=%2',
+'set WILDFLY_HOME=C:\wildfly-39.0.1.Final',
+'if "%WAR%"=="" ( echo [ERROR] Indica el nombre del WAR && exit /b 1 )',
+'if "%INSTANCIA%"=="" set INSTANCIA=1',
+'if "%INSTANCIA%"=="1" set DEPLOY_DIR=!WILDFLY_HOME!\standalone\deployments',
+'if "%INSTANCIA%"=="1" set PUERTO=8080',
+'if "%INSTANCIA%"=="2" set DEPLOY_DIR=!WILDFLY_HOME!\standalone2\deployments',
+'if "%INSTANCIA%"=="2" set PUERTO=8180',
+'if not exist "!DEPLOY_DIR!\!WAR!" ( echo [ERROR] No existe !WAR! en !DEPLOY_DIR! && exit /b 1 )',
+'echo.',
+'echo [INFO]  Instancia   : !INSTANCIA! (puerto !PUERTO!)',
+'echo [INFO]  WAR         : !WAR!',
+'echo [INFO]  Carpeta     : !DEPLOY_DIR!',
+'echo.',
+'echo [INFO]  Creando .dodeploy...',
+'echo. > "!DEPLOY_DIR!\!WAR!.dodeploy"',
+'echo [INFO]  .dodeploy creado OK',
+'echo.',
+'echo [INFO]  Esperando despliegue...',
+'set CONTADOR=0',
+':WAIT_LOOP',
+'timeout /t 2 /nobreak >nul',
+'set /a CONTADOR+=2',
+'if exist "!DEPLOY_DIR!\!WAR!.deployed" goto SUCCESS',
+'if exist "!DEPLOY_DIR!\!WAR!.failed"   goto FAILED',
+'if !CONTADOR! geq 60 goto TIMEOUT',
+'goto WAIT_LOOP',
+':SUCCESS',
+'echo.',
+'echo [OK]    Desplegado en !CONTADOR!s',
+'echo [OK]    URL: http://127.0.0.1:!PUERTO!/!WAR:.war=!/',
+'echo !date! !time! OK !WAR! inst!INSTANCIA! >> "!WILDFLY_HOME!\deploy-history.log"',
+'echo [LOG]   Registrado en deploy-history.log',
+'goto END',
+':FAILED',
+'echo.',
+'echo [ERROR] Despliegue fallido en !CONTADOR!s',
+'echo [ERROR] Revisa: !DEPLOY_DIR!\!WAR!.failed',
+'echo !date! !time! FAILED !WAR! inst!INSTANCIA! >> "!WILDFLY_HOME!\deploy-history.log"',
+'goto END',
+':TIMEOUT',
+'echo.',
+'echo [ERROR] Timeout - no respondio en 60s',
+'echo !date! !time! TIMEOUT !WAR! inst!INSTANCIA! >> "!WILDFLY_HOME!\deploy-history.log"',
+'goto END',
+':END',
+'endlocal'
+)
+
+$lines | Out-File -FilePath "C:\wildfly-39.0.1.Final\bin\deploy.bat" -Encoding ASCII
+```
+
+### Uso
+
+Ejecutar siempre desde la carpeta donde está el WAR o indicando la ruta completa:
+
+```bat
+cd C:\wildfly-39.0.1.Final\standalone\deployments
+C:\wildfly-39.0.1.Final\bin\deploy.bat mi-mini-app.war 1
+C:\wildfly-39.0.1.Final\bin\deploy.bat mi-mini-app.war 2
+```
+
+### Historial de despliegues
+
+Cada operación queda registrada en:
+```
+C:\wildfly-39.0.1.Final\deploy-history.log
+```
+
+```bat
+type C:\wildfly-39.0.1.Final\deploy-history.log
+```
+
+### 🧠 Lecciones aprendidas — Fase 4
+
+| Problema encontrado | Causa | Solución |
+|--------------------|-------|----------|
+| Variables no se expanden dentro de `if` | CMD no expande `%var%` dentro de bloques | Usar `setlocal enabledelayedexpansion` y `!var!` |
+| Fichero `.bat` creado vacío o en una línea | Crear con bloque `()` en CMD | Usar PowerShell con `Out-File -Encoding ASCII` |
+| Script sobreescribe el `.bat` al ejecutarse | Ejecutar el script desde su propia carpeta | Ejecutar siempre desde la carpeta del WAR |
+| `copy` falla si origen y destino son iguales | El WAR ya está en `deployments` | El script solo gestiona `.dodeploy` y monitoriza — no copia |
+
+---
+
+## ✅ Fase 5 — Consola de administración (puerto 9990)
+
+### Concepto
+
+WildFly incluye una consola web de administración que permite gestionar despliegues,
+monitorizar el servidor y configurar subsistemas sin tocar ficheros ni usar comandos.
+
+En PRO es especialmente útil cuando no tienes acceso directo al sistema de ficheros del servidor.
+
+### Acceso
+
+| Instancia | URL consola |
+|-----------|-------------|
+| Instancia 1 | `http://127.0.0.1:9990` |
+| Instancia 2 | `http://127.0.0.1:10090` |
+
+### Paso 1 — Crear usuario administrador
+
+WildFly bloquea la consola por defecto. Desde CMD como Administrador:
+
+```bat
+cd C:\wildfly-39.0.1.Final\bin
+add-user.bat
+```
+
+Seguir el asistente:
+
+```
+What type of user do you wish to add?
+ a) Management User  ← elegir esta
+Username: admin
+Password: admin123*
+Groups: (dejar vacío)
+Is this correct? yes
+Used for AS process interconnection? no
+```
+
+Para la instancia 2:
+
+```bat
+add-user.bat --user-properties C:\wildfly-39.0.1.Final\standalone2\configuration\mgmt-users.properties --group-properties C:\wildfly-39.0.1.Final\standalone2\configuration\mgmt-groups.properties
+```
+
+### Paso 2 — Gestionar despliegues desde la consola
+
+Desde `http://127.0.0.1:9990` → **Deployments**:
+
+| Acción | Cómo |
+|--------|------|
+| Ver WARs desplegados | Listado con estado OK / FAILED |
+| Deshabilitar un WAR | Clic en el WAR → Disable |
+| Habilitar / redesplegar | Clic en el WAR → Enable |
+| Subir un WAR nuevo | Deployments → Add → seleccionar fichero |
+| Eliminar un despliegue | Clic en el WAR → Undeploy → Remove |
+
+> ⚠️ Para subir un WAR desde la consola, el fichero debe tener extensión `.war`.
+> Windows trata los `.war` como carpetas comprimidas — si el navegador no permite
+> seleccionarlo, renombrarlo temporalmente a `.jar`, subirlo y cambiar el nombre
+> del contexto manualmente en la consola.
+
+### Paso 3 — Monitorizar el servidor
+
+Desde `http://127.0.0.1:9990`:
+
+**Memoria y JVM:**
+```
+Runtime → Server → JVM
+```
+Muestra Heap Memory, Non-Heap Memory y Thread Count.
+
+**Estado general:**
+```
+Runtime → Server → Status
+```
+Muestra tiempo de arranque, versión de WildFly y Java.
+
+**Subsistemas:**
+```
+Configuration → Subsystems
+```
+Permite explorar Datasources, Undertow y configuración de Logging.
+
+### 🧠 Lecciones aprendidas — Fase 5
+
+| Problema encontrado | Causa | Solución |
+|--------------------|-------|----------|
+| Consola no abre con `localhost:9990` | Fichero `hosts` de Windows con entradas comentadas | Descomentar `127.0.0.1 localhost` en `C:\Windows\System32\drivers\etc\hosts` |
+| Enlace a la app abre `0.0.0.0:8080` | bind address configurado como `0.0.0.0` | El enlace es orientativo — acceder manualmente a `http://127.0.0.1:8080/mi-mini-app/` |
+| WAR subido como `.war.zip` | Windows trata `.war` como carpeta comprimida | Renombrar a `.jar`, subir y cambiar el nombre del contexto en la consola |
+| Error Forbidden tras reemplazar WAR | WAR sobreescrito con fichero incorrecto | Undeploy → Remove desde consola y recuperar WAR original con `.dodeploy` |
 
 ---
 
