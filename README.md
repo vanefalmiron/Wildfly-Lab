@@ -20,6 +20,8 @@ wildfly-lab/
 │   ├── 03-multi-instance.md           ← dos instancias en puertos distintos
 │   ├── 04-deploy-script.md            ← script .bat de despliegue automatizado
 │   ├── 05-admin-console.md            ← consola de administración (puerto 9990)
+│   ├── 06-logging.md                  ← configuración de logs (size-rotating)
+│   ├── 07-log-reading.md              ← lectura e interpretación de logs
 │   └── architecture.md               ← diagrama y descripción de arquitectura
 │
 ├── scripts/
@@ -57,9 +59,9 @@ wildfly-lab/
   │  │  HTTP  → :8080        │  │  HTTP  → :8180       │ │
   │  │  Admin → :9990        │  │  Admin → :10090      │ │
   │  └───────────────────────┘  └──────────────────────┘ │
-  │           │                          │                │
-  │  standalone\deployments\    standalone2\deployments\  │
-  │   mi-mini-app.war            mi-mini-app.war          │
+  │           │                          │               │
+  │  standalone\deployments\    standalone2\deployments\ │
+  │   mi-mini-app.war            mi-mini-app.war         │
   │                                                      │
   │  ┌───────────────────────────────────────────────┐   │
   │  │  WildFly2Service.exe  (wrapper servicio Win)  │   │
@@ -79,6 +81,8 @@ wildfly-lab/
 | 3 | Dos instancias en puertos distintos | ✅ |
 | 4 | Script .bat automatizado | ✅ |
 | 5 | Consola de administración 9990 | ✅ |
+| 6 | Configuración de logs (size-rotating) | ✅ |
+| 7 | Lectura e interpretación de logs | ✅ |
 
 ---
 
@@ -646,6 +650,258 @@ Permite explorar Datasources, Undertow y configuración de Logging.
 | Enlace a la app abre `0.0.0.0:8080` | bind address configurado como `0.0.0.0` | El enlace es orientativo — acceder manualmente a `http://127.0.0.1:8080/mi-mini-app/` |
 | WAR subido como `.war.zip` | Windows trata `.war` como carpeta comprimida | Renombrar a `.jar`, subir y cambiar el nombre del contexto en la consola |
 | Error Forbidden tras reemplazar WAR | WAR sobreescrito con fichero incorrecto | Undeploy → Remove desde consola y recuperar WAR original con `.dodeploy` |
+
+---
+
+## ✅ Fase 6 — Configuración de logs
+
+### Concepto
+
+WildFly gestiona los logs a través de **handlers** (destinos de escritura) y **loggers** (categorías
+y niveles de captura), configurados en el subsistema `urn:jboss:domain:logging` dentro de `standalone.xml`.
+
+El handler por defecto (`periodic-rotating-file-handler`) rota por fecha pero no tiene límite de
+tamaño ni retención. En PRO es habitual sustituirlo por `size-rotating-file-handler` para controlar
+el espacio en disco.
+
+### Tipos de handler
+
+| Handler | Cuándo rota | Retención | Uso recomendado |
+|---------|-------------|-----------|-----------------|
+| `periodic-rotating-file-handler` | Cada día | ❌ Sin límite | Tráfico bajo y predecible |
+| `size-rotating-file-handler` | Al alcanzar X MB | ✅ `max-backup-index` | Tráfico alto o impredecible |
+
+### Paso 1 — Hacer copia de seguridad
+
+```powershell
+# Instancia 1
+Copy-Item "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml" `
+          "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml.bak"
+
+# Instancia 2
+Copy-Item "C:\wildfly-39.0.1.Final\standalone2\configuration\standalone.xml" `
+          "C:\wildfly-39.0.1.Final\standalone2\configuration\standalone.xml.bak"
+```
+
+### Paso 2 — Sustituir el handler en standalone.xml
+
+Ejecutar en PowerShell para cada instancia (cambiar la ruta de `$file` para la instancia 2):
+
+```powershell
+$file = "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml"
+
+$old = '            <periodic-rotating-file-handler name="FILE" autoflush="true">
+                <formatter>
+                    <named-formatter name="PATTERN"/>
+                </formatter>
+                <file relative-to="jboss.server.log.dir" path="server.log"/>
+                <suffix value=".yyyy-MM-dd"/>
+                <append value="true"/>
+            </periodic-rotating-file-handler>'
+
+$new = '            <size-rotating-file-handler name="FILE" autoflush="true" rotate-on-boot="true">
+                <formatter>
+                    <named-formatter name="PATTERN"/>
+                </formatter>
+                <file relative-to="jboss.server.log.dir" path="server.log"/>
+                <rotate-size value="50m"/>
+                <max-backup-index value="5"/>
+                <append value="true"/>
+            </size-rotating-file-handler>'
+
+(Get-Content $file -Raw).Replace($old, $new) | Set-Content $file -NoNewline
+```
+
+### Atributos clave del handler
+
+| Atributo | Valor | Significado |
+|---|---|---|
+| `rotate-size` | `50m` | Rota cuando el fichero llega a 50 MB |
+| `max-backup-index` | `5` | Conserva máximo 5 ficheros rotados (`server.log.1` … `server.log.5`) |
+| `rotate-on-boot` | `true` | Crea un `server.log` limpio en cada arranque de WildFly |
+
+Con esta configuración el disco nunca acumulará más de ~300 MB de logs por instancia (50m × 5 + el activo).
+
+### Paso 3 — Verificar el cambio
+
+```powershell
+Select-String -Path "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml" `
+              -Pattern "size-rotating|rotate-size|max-backup-index"
+```
+
+Deben aparecer las tres líneas.
+
+### Paso 4 — Reiniciar y verificar arranque
+
+```powershell
+net stop wildfly
+net start wildfly
+
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" -Tail 20 |
+Select-String "WFLYSRV0025|ERROR"
+```
+
+`WFLYSRV0025` confirma que WildFly aceptó la nueva configuración.
+
+### Paso 5 — Comprobar la rotación
+
+```powershell
+dir C:\wildfly-39.0.1.Final\standalone\log\
+```
+
+Gracias a `rotate-on-boot="true"` debe aparecer `server.log` (activo) y `server.log.1` (rotado del arranque anterior).
+
+### 🧠 Lecciones aprendidas — Fase 6
+
+| Qué aprendiste | Detalle |
+|---|---|
+| `periodic-rotating-file-handler` | Rota por fecha pero sin límite de tamaño ni retención |
+| `size-rotating-file-handler` | Rota por tamaño, controla cuántos ficheros se conservan |
+| `rotate-size` | Tamaño máximo antes de rotar (`50m` = 50 MB) |
+| `max-backup-index` | Número máximo de ficheros rotados conservados |
+| `rotate-on-boot` | Crea un `server.log` limpio en cada arranque |
+| Reemplazo con PowerShell | `(Get-Content -Raw).Replace()` para editar XML sin abrir editor |
+
+---
+
+## ✅ Fase 7 — Lectura e interpretación de logs
+
+### Concepto
+
+Saber leer el log de WildFly es la habilidad más útil en PRO. El objetivo es poder abrir
+`server.log` ante cualquier incidente y determinar qué pasó, cuándo y por qué sin herramientas externas.
+
+### Anatomía de una línea de log
+
+```
+2026-04-15 09:50:20,303 INFO  [org.jboss.as] (Controller Boot Thread) WFLYSRV0025: WildFly arrancado
+│                       │      │              │                         │
+│                       │      │              │                         └─ Mensaje
+│                       │      │              └─ Thread que lo generó
+│                       │      └─ Categoría (clase o subsistema)
+│                       └─ Nivel: TRACE / DEBUG / INFO / WARN / ERROR / FATAL
+└─ Timestamp
+```
+
+### Niveles de log
+
+| Nivel | ¿Cuándo actuar? |
+|---|---|
+| `TRACE` / `DEBUG` | Solo en desarrollo, demasiado verboso para PRO |
+| `INFO` | Normal — arranques, despliegues, operaciones correctas |
+| `WARN` | Algo raro pero el servidor sigue funcionando — revisar |
+| `ERROR` | Algo falló — revisar siempre |
+| `FATAL` | El servidor no puede continuar — acción inmediata |
+
+### Filtrar por nivel
+
+```powershell
+# Solo ERRORs
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" |
+Select-String " ERROR "
+
+# Solo WARNs
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" |
+Select-String " WARN "
+
+# ERRORs y WARNs juntos
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" |
+Select-String " ERROR | WARN "
+```
+
+> 💡 Los espacios alrededor de `ERROR` y `WARN` evitan falsos positivos si esas palabras
+> aparecen dentro del texto del mensaje.
+
+### Filtrar por fecha
+
+```powershell
+# Todo lo que pasó en un minuto concreto
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" |
+Select-String "2026-04-15 09:50"
+
+# Todo lo que pasó en una hora concreta
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" |
+Select-String "2026-04-15 09:"
+```
+
+### Leer un stack trace
+
+Un stack trace típico en WildFly tiene esta forma:
+
+```
+2026-04-15 09:50:00,000 ERROR [org.jboss.as.server] (MSC service thread)
+  WFLYCTL0013: Operation failed - address: [...]
+  java.lang.NullPointerException: Cannot invoke method getX() on null
+        at com.miempresa.MiServlet.doGet(MiServlet.java:42)   ← TU código, línea 42
+        at javax.servlet.http.HttpServlet.service(HttpServlet.java:655)
+        at io.undertow.servlet.handlers.ServletHandler.handleRequest(...)
+        ... 25 more
+```
+
+**Cómo leerlo en 3 pasos:**
+
+| Paso | Dónde mirar | Qué buscas |
+|---|---|---|
+| 1 | Primera línea del ERROR | El código WFLY y el mensaje corto |
+| 2 | Primera línea del stack trace | El tipo de excepción (`NullPointerException`, `ClassNotFoundException`…) |
+| 3 | Primera línea con **tu paquete** | El fichero y la línea exacta del fallo |
+
+> 💡 Las líneas de `javax`, `io.undertow`, `org.jboss` son del framework. Tu código aparece
+> con el paquete de tu empresa. Esa es la línea que importa.
+
+### Fases de despliegue en WildFly
+
+Cuando un WAR falla al desplegarse, el error indica en qué fase ocurrió:
+
+```
+STRUCTURE     → ¿Es un ZIP válido? ¿Tiene WEB-INF/web.xml?
+    ↓
+PARSE         → ¿Los descriptores XML son válidos?
+    ↓
+DEPENDENCIES  → ¿Están todas las clases y librerías?
+    ↓
+INSTALL       → Registrar en el servidor
+    ↓
+VERIFY        → Comprobación final
+    ↓
+RUNTIME       → Arrancando la aplicación
+```
+
+Un fallo en `STRUCTURE` significa que el fichero no es un WAR válido. Un fallo en `DEPENDENCIES`
+o `RUNTIME` suele indicar problemas en el código o en las dependencias de la aplicación.
+
+### Provocar y localizar un error de despliegue
+
+```powershell
+# Crear un WAR inválido (contenido que no es un ZIP)
+"esto no es un war valido" | Out-File -FilePath "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war" -Encoding ASCII
+
+# Forzar el despliegue
+"" | Out-File -FilePath "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war.dodeploy" -Encoding ASCII
+
+# Verificar marcador .failed y buscar el error en el log
+Get-ChildItem "C:\wildfly-39.0.1.Final\standalone\deployments\" | Where-Object { $_.Name -like "*app-rota*" }
+Get-Content "C:\wildfly-39.0.1.Final\standalone\log\server.log" -Tail 40 | Select-String "ERROR|app-rota"
+
+# Ver la causa exacta dentro del fichero .failed
+Get-Content "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war.failed"
+
+# Limpiar
+Remove-Item "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war"
+Remove-Item "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war.failed"
+```
+
+### 🧠 Lecciones aprendidas — Fase 7
+
+| Qué aprendiste | Detalle |
+|---|---|
+| Anatomía de una línea | Timestamp · Nivel · Categoría · Thread · Mensaje |
+| Filtrar por nivel | `Select-String " ERROR \| WARN "` con espacios para evitar falsos positivos |
+| Filtrar por fecha | `Select-String "2026-04-15 09:50"` para acotar incidentes |
+| Leer un stack trace | Excepción → fase → primera línea con tu paquete |
+| Fases de despliegue | STRUCTURE → PARSE → DEPENDENCIES → INSTALL → VERIFY → RUNTIME |
+| Fichero `.failed` | Contiene la causa exacta, útil sin acceso directo al log |
+| `echo.` no existe en PowerShell | Usar `"" \| Out-File` en su lugar |
 
 ---
 
