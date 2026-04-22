@@ -22,12 +22,20 @@ wildfly-lab/
 │   ├── 05-admin-console.md            ← consola de administración (puerto 9990)
 │   ├── 06-logging.md                  ← configuración de logs (size-rotating)
 │   ├── 07-log-reading.md              ← lectura e interpretación de logs
+│   ├── 08-ssl.md                      ← certificados SSL y HTTPS puerto 8443
+│   ├── 09-datasources.md              ← datasources JDBC, pool de conexiones, JNDI
+│   ├── 10-properties.md               ← variables de entorno y system-properties
+│   ├── 11-backup-rollback.md          ← backup y rollback de despliegues
 │   └── architecture.md               ← diagrama y descripción de arquitectura
 │
 ├── scripts/
 │   ├── deploy.bat                     ← despliegue automatizado con verificación
+│   ├── deploy-versioned.bat           ← despliegue con versionado automático
+│   ├── rollback.bat                   ← rollback a versión anterior
 │   ├── start-instance2-service.bat    ← arrancar instancia 2 manualmente
 │   └── WildFly2Service.exe            ← wrapper .exe para servicio Windows
+│
+├── versions\                          ← WARs versionados para rollback
 │
 ├── config/
 │   ├── instance1/
@@ -83,6 +91,10 @@ wildfly-lab/
 | 5 | Consola de administración 9990 | ✅ |
 | 6 | Configuración de logs (size-rotating) | ✅ |
 | 7 | Lectura e interpretación de logs | ✅ |
+| 8 | Instalación de certificados SSL / HTTPS | ✅ |
+| 9 | Configuración de datasources | ✅ |
+| 10 | Variables de entorno y propiedades | ✅ |
+| 11 | Backup y rollback de despliegues | ✅ |
 
 ---
 
@@ -902,6 +914,331 @@ Remove-Item "C:\wildfly-39.0.1.Final\standalone\deployments\app-rota.war.failed"
 | Fases de despliegue | STRUCTURE → PARSE → DEPENDENCIES → INSTALL → VERIFY → RUNTIME |
 | Fichero `.failed` | Contiene la causa exacta, útil sin acceso directo al log |
 | `echo.` no existe en PowerShell | Usar `"" \| Out-File` en su lugar |
+
+---
+
+## ✅ Fase 8 — Instalación de certificados SSL / HTTPS
+
+### Concepto
+
+WildFly sirve HTTPS en el puerto 8443 usando un keystore que contiene la clave privada y el certificado.
+En LAB/PRE se usa un certificado autofirmado — el navegador avisa pero el cifrado funciona igual.
+En PRO se importa un certificado firmado por una CA (DigiCert, Let's Encrypt…).
+
+### Conceptos clave
+
+| Concepto | ¿Qué es? |
+|---|---|
+| **keystore** | Fichero que guarda la clave privada y el certificado |
+| **keytool** | Herramienta de Java para crear y gestionar keystores |
+| **certificado autofirmado** | Lo firmas tú mismo — válido para LAB/PRE |
+| **certificado de CA** | Lo firma una autoridad — válido para PRO |
+| **PKCS12** | Formato moderno de keystore (`.p12`) — recomendado en WildFly 39 |
+
+### Paso 1 — Crear el keystore con certificado autofirmado
+
+```powershell
+& "$env:JAVA_HOME\bin\keytool.exe" -genkeypair `
+  -alias wildfly `
+  -keyalg RSA `
+  -keysize 2048 `
+  -validity 365 `
+  -keystore "C:\wildfly-39.0.1.Final\standalone\configuration\wildfly.keystore" `
+  -storetype PKCS12 `
+  -storepass wildfly123 `
+  -keypass wildfly123 `
+  -dname "CN=localhost, OU=LAB, O=MiEmpresa, L=Madrid, ST=Madrid, C=ES"
+```
+
+Repetir para instancia 2 cambiando la ruta a `standalone2\configuration\`.
+
+### Paso 2 — Añadir keystore y SSL context en elytron
+
+Localizar el bloque `<tls>` en `standalone.xml` y añadir `wildflyKS`, `wildflyKM` y `wildflySSC`
+junto a los existentes `applicationKS`, `applicationKM` y `applicationSSC`:
+
+```xml
+<key-store name="wildflyKS">
+    <credential-reference clear-text="wildfly123"/>
+    <implementation type="PKCS12"/>
+    <file path="wildfly.keystore" relative-to="jboss.server.config.dir"/>
+</key-store>
+
+<key-manager name="wildflyKM" key-store="wildflyKS">
+    <credential-reference clear-text="wildfly123"/>
+</key-manager>
+
+<server-ssl-context name="wildflySSC" key-manager="wildflyKM"/>
+```
+
+### Paso 3 — Activar el https-listener en Undertow
+
+Cambiar `applicationSSC` por `wildflySSC` en el listener HTTPS:
+
+```powershell
+$file = "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml"
+$old = '                <https-listener name="https" socket-binding="https" ssl-context="applicationSSC" enable-http2="true"/>'
+$new = '                <https-listener name="https" socket-binding="https" ssl-context="wildflySSC" enable-http2="true"/>'
+(Get-Content $file -Raw).Replace($old, $new) | Set-Content $file -NoNewline
+```
+
+### Verificación
+
+```
+https://127.0.0.1:8443/mi-mini-app/    ← instancia 1 ✅
+https://127.0.0.1:8543/mi-mini-app/    ← instancia 2 ✅
+```
+
+El navegador mostrará aviso de seguridad — normal con certificado autofirmado.
+Avanzado → Continuar para acceder.
+
+### 🧠 Lecciones aprendidas — Fase 8
+
+| Qué aprendiste | Detalle |
+|---|---|
+| `keytool` | Viene incluido con el JDK — usar con ruta completa `$env:JAVA_HOME\bin\keytool.exe` |
+| Keystore PKCS12 | Formato moderno recomendado en WildFly 39, sustituye al antiguo JKS |
+| `CN=localhost` | El Common Name debe coincidir con el hostname — en PRO va el FQDN real |
+| `key-store` → `key-manager` → `server-ssl-context` | Cadena de configuración SSL en elytron |
+| `https-listener` en Undertow | Punto de entrada HTTPS — apunta al SSL context |
+| Puerto 8443 / 8543 | HTTPS instancia 1 / instancia 2 (port-offset +100) |
+| Certificado de CA en PRO | Mismo proceso pero con `-importcert` en lugar de `-genkeypair` |
+
+---
+
+## ✅ Fase 9 — Configuración de datasources
+
+### Concepto
+
+Un datasource es la configuración de conexión a base de datos gestionada por WildFly.
+La aplicación no se conecta directamente a la BD — le pide la conexión a WildFly via JNDI.
+WildFly mantiene un pool de conexiones abiertas y las reutiliza.
+
+### Conceptos clave
+
+| Concepto | ¿Qué es? |
+|---|---|
+| **JDBC** | Driver Java para conectarse a una base de datos |
+| **Datasource** | Configuración de conexión a BD gestionada por WildFly |
+| **JNDI** | Sistema de nombres — la app busca el datasource por nombre (`java:/MiDS`) |
+| **Pool de conexiones** | WildFly mantiene conexiones abiertas y las reutiliza |
+| **H2** | Base de datos embebida en Java — incluida en WildFly, ideal para LAB |
+
+### Datasource H2 por defecto
+
+WildFly incluye `ExampleDS` con H2 en memoria:
+
+```xml
+<datasource jndi-name="java:jboss/datasources/ExampleDS" pool-name="ExampleDS" ...>
+    <connection-url>jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;...</connection-url>
+    <driver>h2</driver>
+    <security user-name="sa" password="sa"/>
+</datasource>
+```
+
+> ⚠️ `jdbc:h2:mem:` — los datos viven en memoria y se pierden al parar WildFly.
+
+### Añadir datasource H2 persistente (LabDS)
+
+```powershell
+$file = "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml"
+
+# Añadir LabDS justo después del cierre de ExampleDS
+$old = '                </datasource>
+                <drivers>'
+
+$new = '                </datasource>
+                <datasource jndi-name="java:jboss/datasources/LabDS" pool-name="LabDS" enabled="true" use-java-context="true">
+                    <connection-url>jdbc:h2:file:${jboss.server.data.dir}/labdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE</connection-url>
+                    <driver>h2</driver>
+                    <pool>
+                        <min-pool-size>2</min-pool-size>
+                        <max-pool-size>10</max-pool-size>
+                        <prefill>true</prefill>
+                    </pool>
+                    <security user-name="sa" password="sa"/>
+                    <validation>
+                        <valid-connection-checker class-name="org.jboss.jca.adapters.jdbc.extensions.novendor.JDBC4ValidConnectionChecker"/>
+                        <background-validation>true</background-validation>
+                    </validation>
+                </datasource>
+                <drivers>'
+
+(Get-Content $file -Raw).Replace($old, $new) | Set-Content $file -NoNewline
+```
+
+### Atributos del pool
+
+| Atributo | Valor | Significado |
+|---|---|---|
+| `min-pool-size` | 2 | Conexiones mínimas abiertas siempre |
+| `max-pool-size` | 10 | Conexiones máximas simultáneas |
+| `prefill` | true | Abre las conexiones mínimas al arrancar |
+| `background-validation` | true | Comprueba periódicamente que las conexiones siguen vivas |
+| `${jboss.server.data.dir}` | `standalone\data\` | WildFly resuelve la ruta automáticamente |
+
+### Verificación
+
+```
+http://127.0.0.1:9990
+Configuration → Subsystems → Datasources & Drivers → Datasources
+LabDS → Test Connection ✅
+```
+
+```powershell
+# El fichero de BD persistente debe existir en disco
+dir "C:\wildfly-39.0.1.Final\standalone\data\" | Where-Object { $_.Name -like "*labdb*" }
+```
+
+### 🧠 Lecciones aprendidas — Fase 9
+
+| Qué aprendiste | Detalle |
+|---|---|
+| `ExampleDS` | Datasource H2 en memoria incluido por defecto — datos no persisten |
+| `jdbc:h2:file:` | H2 persistente en disco — los datos sobreviven al reinicio |
+| `${jboss.server.data.dir}` | Variable de WildFly que resuelve a `standalone\data\` |
+| `min-pool-size` / `max-pool-size` | Controlan cuántas conexiones mantiene el pool |
+| `Test Connection` en consola | Forma rápida de verificar que el datasource funciona |
+| Puerto ocupado por proceso zombie | `netstat -ano \| findstr :PUERTO` → `taskkill /PID X /F` |
+
+---
+
+## ✅ Fase 10 — Variables de entorno y propiedades
+
+### Concepto
+
+Las `system-properties` permiten parametrizar WildFly para que el mismo WAR funcione en LAB, PRE
+y PRO sin recompilar — solo cambiando propiedades en el servidor. El código Java las lee con
+`System.getProperty("nombre")`.
+
+### Añadir system-properties en standalone.xml
+
+El bloque va justo después de `</extensions>`:
+
+```powershell
+$file = "C:\wildfly-39.0.1.Final\standalone\configuration\standalone.xml"
+
+$old = '    </extensions>'
+
+$new = '    </extensions>
+
+    <system-properties>
+        <property name="app.env" value="LAB"/>
+        <property name="app.version" value="1.0"/>
+        <property name="db.jndi" value="java:jboss/datasources/LabDS"/>
+        <property name="app.log.level" value="DEBUG"/>
+    </system-properties>'
+
+(Get-Content $file -Raw).Replace($old, $new) | Set-Content $file -NoNewline
+```
+
+### Propiedades configuradas
+
+| Propiedad | Valor LAB | Uso |
+|---|---|---|
+| `app.env` | `LAB` | Identifica el entorno — en PRO valdría `PRO` |
+| `app.version` | `1.0` | Versión de la app desplegada |
+| `db.jndi` | `java:jboss/datasources/LabDS` | JNDI del datasource — cambia por entorno |
+| `app.log.level` | `DEBUG` | Nivel de log — en PRO sería `WARN` |
+
+### Leer y modificar propiedades via CLI
+
+```powershell
+# Leer una propiedad
+& "C:\wildfly-39.0.1.Final\bin\jboss-cli.bat" --connect --command="/system-property=app.env:read-resource"
+
+# Modificar en caliente (sin reiniciar)
+& "C:\wildfly-39.0.1.Final\bin\jboss-cli.bat" --connect --command="/system-property=app.env:write-attribute(name=value,value=PRE)"
+```
+
+> 💡 `write-attribute` via CLI aplica el cambio en caliente — sin reiniciar WildFly ni cortar el servicio.
+
+### Verificación en consola
+
+```
+http://127.0.0.1:9990
+Configuration → System Properties
+```
+
+Deben aparecer las 4 propiedades listadas.
+
+### 🧠 Lecciones aprendidas — Fase 10
+
+| Qué aprendiste | Detalle |
+|---|---|
+| `system-properties` | Bloque en `standalone.xml` para definir propiedades del servidor |
+| `System.getProperty()` | Cómo el código Java lee las propiedades del servidor |
+| Cambio en caliente | `write-attribute` via CLI aplica el cambio sin reiniciar WildFly |
+| `app.env` | Patrón habitual para identificar el entorno LAB / PRE / PRO |
+| `db.jndi` | El datasource cambia por entorno sin tocar el WAR |
+| CLI desde cualquier ruta | Usar ruta completa `& "C:\wildfly-39.0.1.Final\bin\jboss-cli.bat"` |
+
+---
+
+## ✅ Fase 11 — Backup y rollback de despliegues
+
+### Concepto
+
+Ante un fallo en PRO tras un despliegue, el objetivo es volver a la versión anterior en el menor
+tiempo posible. El sistema de versionado guarda automáticamente una copia del WAR antes de cada
+despliegue, permitiendo rollback inmediato.
+
+### Estructura de versiones
+
+```
+C:\wildfly-39.0.1.Final\
+  ├── versions\
+  │   ├── mi-mini-app_v1.0_20260415-1000.war   ← versión anterior
+  │   └── mi-mini-app_v2.0_20260415-1005.war   ← versión actual
+  ├── bin\
+  │   ├── deploy-versioned.bat                  ← despliega y guarda versión
+  │   └── rollback.bat                          ← restaura versión anterior
+  └── deploy-history.log                        ← historial completo de operaciones
+```
+
+### Crear la carpeta de versiones
+
+```powershell
+New-Item -ItemType Directory -Path "C:\wildfly-39.0.1.Final\versions" -Force
+```
+
+### Uso de deploy-versioned.bat
+
+```bat
+REM Sintaxis: deploy-versioned.bat <WAR> <VERSION> <INSTANCIA>
+cd C:\wildfly-39.0.1.Final\standalone\deployments
+C:\wildfly-39.0.1.Final\bin\deploy-versioned.bat mi-mini-app.war v2.0 1
+```
+
+El script: guarda copia versionada → despliega → registra en `deploy-history.log`.
+
+### Uso de rollback.bat
+
+```bat
+REM Sintaxis: rollback.bat <WAR> <INSTANCIA>
+C:\wildfly-39.0.1.Final\bin\rollback.bat mi-mini-app.war 1
+```
+
+El script: lista versiones disponibles → pide elección → restaura el WAR → redesplega.
+
+### Consultar historial de despliegues
+
+```powershell
+type "C:\wildfly-39.0.1.Final\deploy-history.log"
+```
+
+Cada línea registra: fecha · hora · resultado (OK/FAILED/ROLLBACK) · WAR · versión · instancia.
+
+### 🧠 Lecciones aprendidas — Fase 11
+
+| Qué aprendiste | Detalle |
+|---|---|
+| Carpeta `versions\` | Repositorio local de WARs versionados |
+| `deploy-versioned.bat` | Guarda copia antes de desplegar — nunca pierdes la versión anterior |
+| `rollback.bat` | Lista versiones disponibles y restaura en segundos |
+| `deploy-history.log` | Registro de todas las operaciones — quién desplegó qué y cuándo |
+| `call set "%%VAR%%"` | Truco CMD para expandir variables dentro de bloques `for` |
+| Nunca desplegar sin backup | El script fuerza guardar la versión antes de cada despliegue |
 
 ---
 
